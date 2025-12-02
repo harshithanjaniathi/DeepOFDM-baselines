@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Large data files
+*.npz
+*.npy
+*.mat
+*.h5
+*.hdf5
+
+# Results and experiments
+harshitha_exp/
+results_sep/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+__ignore/*
