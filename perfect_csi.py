@@ -1,7 +1,20 @@
+# -*- coding: utf-8 -*-
+"""
+run_all_estimators.py
+Runs LS, LMMSE(R), and Iterative-LMMSE in one run with common settings.
+
+Artifacts per-estimator (under runs/<ts>/<estimator>/):
+  - ber_bler.csv
+  - simulate_console.log
+  - meta.json
+Also produces a combined plot: runs/<ts>/ber_curves_all.png
+"""
+
+# ----------------------------- Env / Imports -----------------------------
 import os
 # Choose GPU (or export CUDA_VISIBLE_DEVICES before running)
 if os.getenv("CUDA_VISIBLE_DEVICES") is None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = "1"  # <-- set to your GPU id
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'  # silence TF C++ logs
 
@@ -30,7 +43,7 @@ tf.get_logger().setLevel('ERROR')
 import numpy as np
 import matplotlib.pyplot as plt
 from tensorflow.keras import Model
-sn.phy.config.seed = 42  
+sn.phy.config.seed = 42  # reproducibility
 
 from sionna.phy.ofdm import ResourceGrid,RemoveNulledSubcarriers,ResourceGridMapper,OFDMModulator,OFDMDemodulator,LSChannelEstimator,PilotPattern,ZFEqualizer,LMMSEEqualizer
 from sionna.phy.mapping import BinarySource,Mapper,Demapper,SymbolDemapper,Constellation
@@ -39,7 +52,7 @@ from sionna.phy.channel.tr38901 import TDL,CDL,AntennaArray
 from sionna.phy.utils import ebnodb2no,expand_to_rank,PlotBER
 from sionna.phy.fec.ldpc.decoding import LDPC5GEncoder,LDPC5GDecoder
 # ----------------------------- Logging utils -----------------------------
-import csv, io, json, contextlib, logging, argparse
+import csv, io, json, contextlib, logging
 from datetime import datetime
 
 def _make_run_dir(base_dir="runs"):
@@ -96,41 +109,33 @@ def _save_meta(path, model, ebnos, batch_size, num_target_block_errors, max_mc_i
         "estimator": getattr(model, "estimator", ""),
         "num_iterations": int(getattr(model, "num_iterations", 0)),
         "R_path": R_PATH,
-        "domain": getattr(model, "domain", ""),
-        "channel_type": getattr(model, "channel_type", ""),
-        "channel_model": getattr(model, "channel_model", ""),
-        "speed": float(getattr(model, "speed", 0.0)),
+        "domain": getattr(model, "domain", "")
     }
     with open(path, "w") as f:
         json.dump(meta, f, indent=2)
 
 # ----------------------------- Config: R path -----------------------------
-# R_PATH will be computed at runtime based on CHANNEL and SPEED (or overridden
-# by the environment variable R_PATH). Initialize empty here and set in main.
-R_PATH = os.environ.get("R_PATH", "")
+R_PATH = os.environ.get(
+    "R_PATH",
+    "/home/ha26227/neural_precoder-reproduce/TDL_R_A_Nsc128_Nsym14_Nsamp1000000_Speed10.0.npz"  # <-- set to your file
+)
 
 # --------------------------- Base OFDM System ----------------------------
 class OFDMSystemBase(Model):
-    def __init__(self, estimator: str, domain: str, num_subcarriers: int, num_symbols: int, perfect_csi: bool, num_iterations:int=4, speed: float=100.0, channel_type: str="TDL", channel_model: str="A"):
+    def __init__(self, estimator: str, domain: str, num_subcarriers: int, num_symbols: int, perfect_csi: bool, num_iterations:int=4):
         """
         estimator in {"ls", "lmmse", "iter_lmmse"}
-        speed: mobility speed in m/s (default 100.0)
-        channel_type: "TDL" or "CDL" (default "TDL")
-        channel_model: "A", "B", "C", "D", "E" (default "A")
         """
         self.estimator = estimator
         self.num_iterations = num_iterations
-        self.speed = speed
         self.domain = domain
-        self.channel_type = channel_type
-        self.channel_model = channel_model
         #========== Resource Grid (common) =================#
         self.num_effective_subcarriers = num_subcarriers
         self.num_ofdm_symbols = num_symbols
         self.pilot_idx = [2,11]
         self.carrier_spacing = 15e3
-        self.carrier_frequency = 2.0e9
-        self.cyclic_prefix_length = 13
+        self.carrier_frequency = 2.6e9
+        self.cyclic_prefix_length = 6
 
         NUM_UT = 1
         NUM_UT_ANT = 1
@@ -165,10 +170,18 @@ class OFDMSystemBase(Model):
         #========== Coding params (common) ==========#
         self.perfect_csi = perfect_csi
         self.num_bits_per_symbol = 6
-        self.coderate = 0.5
-        self.n = int(self.rg.num_data_symbols * self.num_bits_per_symbol)
-        self.k = self.n // 2
-        self.num_codewords = 1
+        # Use 2/3 and fixed n=1944 (two codewords) for comparability with your earlier setup
+        self.coderate = 2/3 if estimator != "iter_lmmse" else 1/2  # (you can unify if you prefer)
+        if estimator != "iter_lmmse":
+            self.n = 1944
+            self.num_codewords = 2
+            self.k = int(self.n * self.coderate)
+        else:
+            # Iterative version used full-grid-based n in your snippet; keep that pattern:
+            self.n = int(self.rg.num_data_symbols * self.num_bits_per_symbol)
+            self.num_codewords = 1
+            self.k = self.n // 2
+
         self.num_data_symbols = self.rg.num_data_symbols
         syms_per_codeword = self.n // self.num_bits_per_symbol
         total_codeword_syms = self.num_codewords * syms_per_codeword
@@ -176,12 +189,14 @@ class OFDMSystemBase(Model):
         assert pad_syms >= 0, "Grid too small for the given num_codewords"
         self.pad_bits = pad_syms * self.num_bits_per_symbol
 
+        #========== Blocks (common) ==========#
         self.binary_source = BinarySource()
         self.encoder = LDPC5GEncoder(self.k, self.n)
 
-        if estimator == "iter_lmmse" or estimator == "lmmse":
-            self.decoder_app = LDPC5GDecoder(self.encoder, hard_out=False, return_infobits=False, num_iter= 20 if estimator == "iter_lmmse" else 40)
-            self.decoder_hard = LDPC5GDecoder(self.encoder, hard_out=True, return_infobits=True, num_iter=20 if estimator == "iter_lmmse" else 40)
+        # Decoder configurations per path (APP or hard depends on usage)
+        if estimator == "iter_lmmse":
+            self.decoder_app = LDPC5GDecoder(self.encoder, hard_out=False, return_infobits=False, num_iter=20)
+            self.decoder_hard = LDPC5GDecoder(self.encoder, hard_out=True, return_infobits=True, num_iter=20)
         else:
             self.decoder_hard = LDPC5GDecoder(self.encoder, return_infobits=False, hard_out=True, num_iter=40)
 
@@ -192,46 +207,13 @@ class OFDMSystemBase(Model):
         self._ls_est    = LSChannelEstimator(self.rg, interpolation_type="nn")
 
         self.tau_rms = 150e-9
-        
-        # Build channel based on type (TDL or CDL)
-        if self.channel_type.upper() == "CDL":
-            # CDL channel requires antenna arrays
-            ut_array = AntennaArray(
-                num_rows=1,
-                num_cols=1,
-                polarization="single",
-                polarization_type="V",
-                antenna_pattern="38.901",
-                carrier_frequency=self.carrier_frequency
-            )
-            bs_array = AntennaArray(
-                num_rows=1,
-                num_cols=1,
-                polarization="single",
-                polarization_type="V",
-                antenna_pattern="38.901",
-                carrier_frequency=self.carrier_frequency
-            )
-            self.channel_obj = CDL(
-                model=self.channel_model,
-                delay_spread=self.tau_rms,
-                carrier_frequency=self.carrier_frequency,
-                ut_array=ut_array,
-                bs_array=bs_array,
-                direction="uplink",
-                min_speed=self.speed,
-                max_speed=None
-            )
-        else:  # TDL (default)
-            self.channel_obj = TDL(
-                model=self.channel_model,
-                delay_spread=self.tau_rms,
-                carrier_frequency=self.carrier_frequency,
-                min_speed=self.speed,
-                max_speed=None
-            )
+        self.TDL = TDL(model="A",
+                       delay_spread=self.tau_rms,
+                       carrier_frequency=self.carrier_frequency,
+                       min_speed=100.0,
+                       max_speed=None)
 
-        self.channel = OFDMChannel(self.channel_obj, self.rg, normalize_channel=True, return_channel=True)
+        self.channel = OFDMChannel(self.TDL, self.rg, normalize_channel=True, return_channel=True)
 
         self.zf_equ = ZFEqualizer(self.rg, self.STREAM_MANAGEMENT)
         self.lmmse_equ = LMMSEEqualizer(self.rg, self.STREAM_MANAGEMENT)
@@ -245,11 +227,13 @@ class OFDMSystemBase(Model):
         self._modulator = OFDMModulator(self.cyclic_prefix_length)
         self._demodulator = OFDMDemodulator(self.num_effective_subcarriers, self._l_min, self.cyclic_prefix_length)
 
+    # ----------------- helpers -----------------
     def _pilot_mask_flat(self):
         mask = self.rg.pilot_pattern.mask
         flat_mask = tf.reshape(mask, [-1])
         return tf.cast(flat_mask, tf.bool)
 
+    # ----------------- LMMSE (non-iter) using correlation R -----------------
     def lmmse_est_R(self, y_rg, no):
         if not os.path.exists(R_PATH):
             raise FileNotFoundError(f"R not found: {R_PATH}")
@@ -262,6 +246,7 @@ class OFDMSystemBase(Model):
         flat_mask = self._pilot_mask_flat()
         pilot_idx = tf.reshape(tf.where(flat_mask), [-1])  # [nP]
 
+        # Build p (pilot vector) from pattern
         pvals = tf.cast(self.rg.pilot_pattern.pilots, tf.complex64)
         p = tf.scatter_nd(tf.expand_dims(pilot_idx, 1),
                           tf.reshape(pvals, [-1]),
@@ -297,6 +282,7 @@ class OFDMSystemBase(Model):
         err_var = tf.maximum(err_var, tf.cast(1e-10, err_var.dtype))
         return h_hat, err_var
 
+    # ----------------- Iterative-LMMSE (your E[xx^H] version) -----------------
     def get_prior_dist(self, llr_p):
         llr_p = tf.reshape(llr_p, [self.batch_size, self.num_data_symbols, self.num_bits_per_symbol])
         indices = tf.range(2**self.num_bits_per_symbol, dtype=tf.int32)
@@ -315,24 +301,30 @@ class OFDMSystemBase(Model):
         R = tf.convert_to_tensor(R_np, dtype=tf.complex64)  # [N,N]
         N = tf.shape(R)[0]
 
+        # Vectorize y
         y = tf.reshape(y_rg, [self.batch_size, -1])  # [B,N]
 
+        # Constellation stats
         const = self.mapper.constellation.points  # [M]
         priors = tf.cast(priors, tf.complex64)    # [B,n,M]
         mu_x  = tf.einsum('bnm,m->bn', priors, const)  # [B,n]
         mu_x2 = tf.einsum('bnm,m->bn', priors, tf.cast(tf.abs(const)**2, tf.complex64))  # [B,n]
 
+        # Build P, p vector
         P, _, _ = self.get_pilot_data(y)
         P = tf.cast(P, tf.complex64)         # [1,1,nsym,fft]
         p = tf.reshape(P, [-1])              # [N]
 
+        # Separate data RE indices
         data_mask = tf.equal(p, tf.complex(0.0, 0.0))
         data_idx  = tf.cast(tf.where(data_mask)[:, 0], tf.int32)  # [N_data]
         N_total   = tf.size(p)
         N_data    = tf.shape(data_idx)[0]
 
+        # Repeat p across batch
         p_full = tf.tile(p[tf.newaxis, :], [self.batch_size, 1])  # [B,N]
 
+        # Scatter mu_x (which is defined only for data RE) into full grid
         b = tf.range(self.batch_size, dtype=tf.int32)[:, tf.newaxis]    # [B,1]
         lin = tf.reshape(b * N_total + data_idx[tf.newaxis, :], [-1, 1])  # [B*N_data,1]
 
@@ -343,6 +335,7 @@ class OFDMSystemBase(Model):
 
         mu_full = p_full + data_full  # [B,N]
 
+        # E[|x|^2] for data RE + pilots
         pilot_e2_1d = tf.cast(tf.abs(p)**2, tf.complex64)   # [N]
         pilot_e2 = tf.tile(pilot_e2_1d[tf.newaxis, :], [self.batch_size, 1])  # [B,N]
 
@@ -354,30 +347,33 @@ class OFDMSystemBase(Model):
         e2_full = tf.cast(pilot_e2 + data_e2, tf.float32)   # [B,N]
         var_full = tf.maximum(e2_full - tf.square(tf.abs(mu_full)), 0.0)  # [B,N]
 
+        # E[xx^H] = mu mu^H + diag(var)
         outer_mu = tf.einsum('bi,bk->bik', mu_full, tf.math.conj(mu_full))        # [B,N,N]
         E_xxH = outer_mu + tf.linalg.diag(tf.cast(var_full, tf.complex64))        # [B,N,N]
 
-        mu_conj = tf.math.conj(mu_full)           
-        R_exp = tf.expand_dims(R, axis=0)      
-        Left = R_exp * mu_conj[:, tf.newaxis, :]  
+        # Solve (R .* E_xxH + σ^2 I) v = y, where .* is elementwise on columns as needed
+        mu_conj = tf.math.conj(mu_full)            # [B,N]
+        R_exp = tf.expand_dims(R, axis=0)          # [1,N,N]
+        Left = R_exp * mu_conj[:, tf.newaxis, :]   # [B,N,N]  (scale columns by mu_conj)
 
-        A = tf.math.multiply(tf.expand_dims(R, 0), E_xxH)
+        A = tf.math.multiply(tf.expand_dims(R, 0), E_xxH)  # [B,N,N] (elementwise multiply)
         A = A + tf.cast(no, tf.complex64) * tf.eye(N, dtype=tf.complex64)[tf.newaxis, ...]
         A = 0.5 * (A + tf.linalg.adjoint(A))
         A = A + 1e-10 * tf.eye(N, dtype=tf.complex64)[tf.newaxis, :]
 
         L = tf.linalg.cholesky(A)
-        v = tf.linalg.cholesky_solve(L, y[..., tf.newaxis]) 
-        v = tf.squeeze(v, -1)                               
+        v = tf.linalg.cholesky_solve(L, y[..., tf.newaxis])  # [B,N,1]
+        v = tf.squeeze(v, -1)                                # [B,N]
 
-        h_hat = tf.einsum('bij,bj->bi', Left, v)             
+        h_hat = tf.einsum('bij,bj->bi', Left, v)             # [B,N]
 
-        Right = R[tf.newaxis, ...] * mu_full[:, :, tf.newaxis]  
-        Z = tf.linalg.cholesky_solve(L, Right)                  
-        R_tilde = R[tf.newaxis, ...] - tf.matmul(Left, Z)      
-        err_var = tf.linalg.diag_part(R_tilde) + tf.cast(no, tf.complex64)  
-        return h_hat, err_var 
-  
+        Right = R[tf.newaxis, ...] * mu_full[:, :, tf.newaxis]  # [B,N,N]
+        Z = tf.linalg.cholesky_solve(L, Right)                  # [B,N,N]
+        R_tilde = R[tf.newaxis, ...] - tf.matmul(Left, Z)       # [B,N,N]
+        err_var = tf.linalg.diag_part(R_tilde) + tf.cast(no, tf.complex64)  # [B,N]
+        return h_hat, err_var  # complex err_var; caller will reshape & expand if needed
+
+    # ----------------- __call__ per estimator -----------------
     @tf.function
     def __call__(self, batch_size: int, ebno_db: float):
         self.batch_size = batch_size
@@ -390,6 +386,7 @@ class OFDMSystemBase(Model):
         # Source & coding
         bits = self.binary_source([batch_size, self.rg.num_tx, self.rg.num_streams_per_tx, self.num_codewords*self.k])
         if self.estimator == "iter_lmmse":
+            # For iterative mode, bits are info-bits; encoder expects [B,CW,K]
             bits = tf.reshape(bits, [batch_size, self.num_codewords, self.k])
             c = self.encoder(bits)                                # [B,CW,N]
             c_flat = tf.reshape(c, [batch_size, self.num_codewords*self.n])
@@ -411,7 +408,7 @@ class OFDMSystemBase(Model):
             y_rg, h_freq = self.channel(x_rg, no)
 
         else:  # time domain channel
-            a, tau = self.channel_obj(self.batch_size, self.rg.num_time_samples * 1 + self._l_tot - 1, self.rg.bandwidth)  
+            a, tau = self.TDL(self.batch_size, self.rg.num_time_samples * 1 + self._l_tot - 1, self.rg.bandwidth)  
             h_time = cir_to_time_channel(self.rg.bandwidth, a, tau, l_min=self._l_min, l_max=self._l_max, normalize=True)
             h_freq = time_to_ofdm_channel(h_time, self.rg, self._l_min)
 
@@ -419,7 +416,7 @@ class OFDMSystemBase(Model):
             y_time = self._channel_time(x_time, h_time, no)
             y_rg = self._demodulator(y_time)
 
-       #Ignore perfefct CSI case here 
+        # --- Estimation & Equalization paths ---
         if self.perfect_csi:
             h_hat = self.rm(h_freq)
             err_var = tf.fill(tf.shape(h_hat)[1:], tf.cast(no, tf.float32))
@@ -435,23 +432,23 @@ class OFDMSystemBase(Model):
             u = tf.reshape(c, [self.batch_size, self.num_codewords, self.n])
             return u, u_hat
 
-        if self.estimator == "ls":
-            # LS estimate
-            h_hat_ls, err_ls = self._ls_est(y_rg, no)           # err_ls: [rx,rx_ant,nsym,fft]
-            target = tf.shape(h_freq)
-            h_hat = tf.reshape(h_hat_ls, target)
-            err_var = tf.reshape(err_ls, target[1:])
-            err_var = tf.expand_dims(err_var, axis=2)
-            no_vec = tf.fill([batch_size], no)
-            x_hat, no_eff = self.lmmse_equ(y_rg, h_hat, err_var, no_vec)  # LMMSE equalizer
-            no_eff = expand_to_rank(no_eff, tf.rank(x_hat))
-            llr = self.demapper(x_hat, no_eff)
-            llr = tf.squeeze(llr, axis=[1, 2])
-            llr_coded = llr[:, :self.num_codewords * self.n]
-            llr_cw = tf.reshape(llr_coded, [self.batch_size, self.num_codewords, self.n])
-            u_hat = self.decoder_hard(llr_cw)
-            u = tf.reshape(c, [self.batch_size, self.num_codewords, self.n])
-            return u, u_hat
+        # if self.estimator == "ls":
+        #     # LS estimate
+        #     h_hat_ls, err_ls = self._ls_est(y_rg, no)           # err_ls: [rx,rx_ant,nsym,fft]
+        #     target = tf.shape(h_freq)
+        #     h_hat = tf.reshape(h_hat_ls, target)
+        #     err_var = tf.reshape(err_ls, target[1:])
+        #     err_var = tf.expand_dims(err_var, axis=2)
+        #     no_vec = tf.fill([batch_size], no)
+        #     x_hat, no_eff = self.lmmse_equ(y_rg, h_hat, err_var, no_vec)  # LMMSE equalizer
+        #     no_eff = expand_to_rank(no_eff, tf.rank(x_hat))
+        #     llr = self.demapper(x_hat, no_eff)
+        #     llr = tf.squeeze(llr, axis=[1, 2])
+        #     llr_coded = llr[:, :self.num_codewords * self.n]
+        #     llr_cw = tf.reshape(llr_coded, [self.batch_size, self.num_codewords, self.n])
+        #     u_hat = self.decoder_hard(llr_cw)
+        #     u = tf.reshape(c, [self.batch_size, self.num_codewords, self.n])
+        #     return u, u_hat
 
         # elif self.estimator == "lmmse":
         #     # Non-iter LMMSE with R
@@ -471,42 +468,45 @@ class OFDMSystemBase(Model):
         #     u = tf.reshape(c, [self.batch_size, self.num_codewords, self.n])
         #     return u, u_hat
 
-        else:  # iterative LMMSE
-            demapllr_prev = tf.zeros([self.batch_size, self.rg.num_tx, self.rg.num_streams_per_tx,
-                                      self.num_data_symbols, self.num_bits_per_symbol], dtype=tf.float32)
-            decllr_prev  = tf.zeros_like(demapllr_prev, dtype=tf.float32)
+        # else:  # iterative LMMSE
+        #     demapllr_prev = tf.zeros([self.batch_size, self.rg.num_tx, self.rg.num_streams_per_tx,
+        #                               self.num_data_symbols, self.num_bits_per_symbol], dtype=tf.float32)
+        #     decllr_prev  = tf.zeros_like(demapllr_prev, dtype=tf.float32)
 
-            for _ in range(self.num_iterations):
-                priors = self.get_prior_dist(decllr_prev)  
-                h_hat_vec, err_vec = self.lmmse_est_iterative(y_rg, no, priors) 
-                target = tf.shape(h_freq)
-                h_hat = tf.reshape(h_hat_vec, target)
-                err_var = tf.reshape(tf.math.real(err_vec), target)[:, :, :1, :, :] 
+        #     for _ in range(self.num_iterations):
+        #         priors = self.get_prior_dist(decllr_prev)   # [B,n,M]
+        #         h_hat_vec, err_vec = self.lmmse_est_iterative(y_rg, no, priors)  # [B,N], [B,N]
+        #         target = tf.shape(h_freq)
+        #         h_hat = tf.reshape(h_hat_vec, target)
+        #         # For ZF we can ignore err_var; keep API-compatible shapes
+        #         err_var = tf.reshape(tf.math.real(err_vec), target)[:, :, :1, :, :]  # dummy shape if needed
 
-                no2 = tf.fill([batch_size], no)
-                x_hat, no_eff = self.zf_equ(y_rg, h_hat, err_var, no2)  
-                no_eff = expand_to_rank(no_eff, tf.rank(x_hat))
+        #         no2 = tf.fill([batch_size], no)
+        #         x_hat, no_eff = self.zf_equ(y_rg, h_hat, err_var, no2)  # ZF path as in your code
+        #         no_eff = expand_to_rank(no_eff, tf.rank(x_hat))
 
-                llr = self.demapper(x_hat, no_eff, decllr_prev)  
-                llr = tf.squeeze(llr, axis=[1, 2])
-                llr_coded = llr[:, :self.num_codewords * self.n]
-                llr_cw = tf.reshape(llr_coded, [self.batch_size, self.num_codewords, self.n])
+        #         llr = self.demapper(x_hat, no_eff, decllr_prev)  # use prior LLRs
+        #         llr = tf.squeeze(llr, axis=[1, 2])
+        #         llr_coded = llr[:, :self.num_codewords * self.n]
+        #         llr_cw = tf.reshape(llr_coded, [self.batch_size, self.num_codewords, self.n])
 
-                prev_app = tf.reshape(decllr_prev, [self.batch_size, -1])
-                prev_app = prev_app[:, :self.num_codewords * self.n]
-                prev_app = tf.reshape(prev_app, [self.batch_size, self.num_codewords, self.n])
+        #         prev_app = tf.reshape(decllr_prev, [self.batch_size, -1])
+        #         prev_app = prev_app[:, :self.num_codewords * self.n]
+        #         prev_app = tf.reshape(prev_app, [self.batch_size, self.num_codewords, self.n])
 
-                llr_e = llr_cw - prev_app
-                dec_llr = self.decoder_app(llr_e)
-                decllr_prev = tf.reshape(dec_llr, [self.batch_size, -1])
-                decllr_prev = tf.pad(decllr_prev, [[0, 0], [0, self.pad_bits]])
-                decllr_prev = tf.reshape(decllr_prev, [self.batch_size, self.rg.num_tx, self.rg.num_streams_per_tx,
-                                                       self.num_data_symbols, self.num_bits_per_symbol])
+        #         llr_e = llr_cw - prev_app
+        #         dec_llr = self.decoder_app(llr_e)
+        #         decllr_prev = tf.reshape(dec_llr, [self.batch_size, -1])
+        #         decllr_prev = tf.pad(decllr_prev, [[0, 0], [0, self.pad_bits]])
+        #         decllr_prev = tf.reshape(decllr_prev, [self.batch_size, self.rg.num_tx, self.rg.num_streams_per_tx,
+        #                                                self.num_data_symbols, self.num_bits_per_symbol])
 
-            u_hat = self.decoder_hard(llr_e)
-            u = tf.reshape(bits, [self.batch_size, self.num_codewords, self.k])
-            return u, u_hat
+        #     # Final hard decision
+        #     u_hat = self.decoder_hard(llr_e)
+            # u = tf.reshape(bits, [self.batch_size, self.num_codewords, self.k])
+            # return u, u_hat
 
+    # Keep for iterative path
     def get_pilot_data(self, y):
         pilot_pattern = self.rg.pilot_pattern
         pilot_vals = pilot_pattern.pilots
@@ -522,95 +522,9 @@ class OFDMSystemBase(Model):
         y_p = tf.gather(y, idx, axis=1)
         return P, y_p, idx
 
+# ----------------------------- Runner ------------------------------------
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--channel", help="Channel designation (e.g. TDL-D, CDL-C) used for R_PATH lookup",
-                        default=os.environ.get("CHANNEL", "TDL-D"))
-    parser.add_argument("--channel-type", help="Channel type: TDL or CDL (default: TDL)",
-                        default=os.environ.get("CHANNEL_TYPE", "TDL"), choices=["TDL", "CDL"])
-    parser.add_argument("--channel-model", help="Channel model variant: A, B, C, D, E (default: A)",
-                        default=os.environ.get("CHANNEL_MODEL", "A"))
-    parser.add_argument("--speed", help="Speed in m/s (e.g. 10,40,60,100)",
-                        default=os.environ.get("SPEED", "10"))
-    parser.add_argument("--run-base", help="Base run dir name", default=os.environ.get("RUN_BASE", "cp6_timedomain_01122025"))
-    args = parser.parse_args()
-
-    # Compute R_PATH if not provided via env
-    channel = args.channel
-    speed = args.speed
-    if not R_PATH:
-        import glob
-        speed_tag = f"{float(speed):.1f}"
-
-        # Search directories to look for R mats (prefer the R_mats_timedomain dir)
-        repo_dir = os.path.dirname(__file__)
-        search_dirs = [os.path.join(repo_dir, "R_mats_timedomain"), repo_dir, os.getcwd()]
-
-        ch_up = channel.upper()
-        is_tdl = ch_up.startswith("TDL") or ch_up.startswith("T")
-        is_cdl = ch_up.startswith("CDL") or ch_up.startswith("C")
-        preferred_letter = None
-        # Try to extract a short letter if provided (e.g. "TDL-D" -> "D", "TDL-C" -> "C")
-        if "-" in ch_up:
-            parts = ch_up.split("-")
-            if len(parts) > 1 and len(parts[1]) == 1:
-                preferred_letter = parts[1]
-
-        candidates = []
-        pat_speed = f"*Speed{speed_tag}*.npz"
-        for d in search_dirs:
-            if not d:
-                continue
-            # priority patterns depending on type
-            patterns = []
-            if is_tdl:
-                patterns += [os.path.join(d, f"TDL_R_*Speed{speed_tag}*.npz"),
-                             os.path.join(d, f"TDL_R_CIR_*Speed{speed_tag}*.npz"),
-                             os.path.join(d, pat_speed)]
-            elif is_cdl:
-                patterns += [os.path.join(d, f"CDL_R_*Speed{speed_tag}*.npz"),
-                             os.path.join(d, f"CDL_R_CIR_*Speed{speed_tag}*.npz"),
-                             os.path.join(d, pat_speed)]
-            else:
-                patterns += [os.path.join(d, pat_speed)]
-
-            for p in patterns:
-                matches = glob.glob(p)
-                for m in matches:
-                    if m not in candidates:
-                        candidates.append(m)
-
-        # If multiple candidates, try to pick the one matching preferred_letter (C/D/A etc.)
-        chosen = None
-        if candidates:
-            if preferred_letter:
-                for c in candidates:
-                    # look for patterns like _D_, _D., _D-N or CIR_D
-                    name = os.path.basename(c).upper()
-                    if f"_{preferred_letter}" in name or f"CIR_{preferred_letter}" in name or name.endswith(f"{preferred_letter}.NPZ"):
-                        chosen = c
-                        break
-            # fallback heuristics: prefer files in R_mats_timedomain, then repo_dir
-            if not chosen:
-                for d in search_dirs:
-                    for c in candidates:
-                        if os.path.dirname(c) == d:
-                            chosen = c
-                            break
-                    if chosen:
-                        break
-            # final fallback: take first
-            if not chosen:
-                chosen = candidates[0]
-
-            R_PATH = chosen
-        else:
-            R_PATH = os.environ.get("R_PATH", "")
-    else:
-        # R_PATH already provided by environment
-        pass
-
-    ROOT = _make_run_dir(args.run_base)
+    ROOT = _make_run_dir("final_baseline_runs_time_domain")
     LOGGER = _setup_logging(ROOT, name="all_estimators")
 
     # Env info
@@ -624,38 +538,34 @@ if __name__ == "__main__":
     except Exception as e:
         LOGGER.warning(f"GPU detail query failed: {e}")
     LOGGER.info(f"R_PATH: {R_PATH}")
-    LOGGER.info(f"Channel: {channel}, Speed: {speed}")
 
     # Common sweep config
-    EBNOS = np.arange(0, 18, 2)
-    BATCH = 64
+    EBNOS = np.arange(0, 20, 1)
+    BATCH = 128
     TARGET_BLK_ERR = 100
     MAX_FRAMES = 5000
 
     specs = [
-        ("perfect_csi", "Perfect CSI"),
-        # ("ls",          "LS"),
-        # ("lmmse",       "LMMSE"),
-        # ("iter_lmmse",  "Iterative-LMMSE"),
+        ("perfect_csi", "Perfect CSI + LMMSE-Equalizer"),
+        # ("ls",          "LS + LMMSE-Equalizer"),
+        # ("lmmse",       "LMMSE(R) + LMMSE-Equalizer"),
+        # ("iter_lmmse",  "Iterative-LMMSE (ZF equalizer)"),
     ]
 
     curves = {}  # name -> (ber, bler)
-    channel_safe = channel.replace('-', '').replace(' ', '_')
+
     for est_key, legend in specs:
-        sub = _subdir(ROOT, f"{est_key}_speed{speed}_{channel_safe}")
+        sub = _subdir(ROOT, est_key)
         LOGGER.info(f"=== Running {legend} ===")
 
         Model = OFDMSystemBase(estimator=est_key,
                                num_subcarriers=128,
                                num_symbols=14,
                                perfect_csi=True,
-                               num_iterations=4 if est_key=="iter_lmmse" else 1,
-                               domain="time",
-                               speed=float(speed),
-                               channel_type=args.channel_type,
-                               channel_model=args.channel_model)
+                               num_iterations=4,
+                               domain = "time")
 
-        ber_plots = PlotBER(f"OFDM over 3GPP {args.channel_type}-{args.channel_model} ({legend})")
+        ber_plots = PlotBER(f"OFDM over 3GPP TDL ({legend})")
 
         _buf = io.StringIO()
         with contextlib.redirect_stdout(_buf):
@@ -664,8 +574,6 @@ if __name__ == "__main__":
                 ebno_dbs=EBNOS,
                 batch_size=BATCH,
                 num_target_block_errors=TARGET_BLK_ERR,
-                target_bler=1e-4,
-                early_stop=True,
                 soft_estimates=True,
                 max_mc_iter=MAX_FRAMES,
                 legend=legend,
@@ -681,41 +589,6 @@ if __name__ == "__main__":
 
         LOGGER.info(f"Saved: {sub}/ber_bler.csv, simulate_console.log, meta.json")
         curves[legend] = (np.asarray(ber).ravel(), np.asarray(bler).ravel())
-        
-        # Clear GPU memory between estimator runs
-        tf.keras.backend.clear_session()
-        import gc
-        gc.collect()
-
-    # Save a combined CSV containing all estimators for quick identification
-    # Filename contains the channel and speed
-    safe_channel = channel.replace(' ', '_')
-    comb_csv_name = f"results_{safe_channel}_speed{speed}.csv"
-    comb_csv_path = os.path.join(ROOT, comb_csv_name)
-    # Prepare header columns in the order of specs
-    headers = ["EbNo_dB"]
-    for _, legend in specs:
-        key = legend.replace('-', '_')
-        headers.append(f"{key}_BER")
-        headers.append(f"{key}_BLER")
-
-    # Compose rows
-    rows = []
-    num_points = len(EBNOS)
-    for i in range(num_points):
-        row = [float(EBNOS[i])]
-        for _, legend in specs:
-            ber_vals, bler_vals = curves.get(legend, (np.full(num_points, np.nan), np.full(num_points, np.nan)))
-            row.append(float(ber_vals[i]))
-            row.append(float(bler_vals[i]))
-        rows.append(row)
-
-    with open(comb_csv_path, 'w', newline='') as f:
-        w = csv.writer(f)
-        w.writerow(headers)
-        for r in rows:
-            w.writerow(r)
-    LOGGER.info(f"Saved combined results CSV: {comb_csv_path}")
 
     # Combined plot
     plt.figure(figsize=(10, 6))
@@ -730,3 +603,5 @@ if __name__ == "__main__":
     plt.savefig(comb_path, dpi=220)
     plt.close()
     LOGGER.info(f"Saved combined plot: {comb_path}")
+
+    print("Artifacts root:", ROOT)

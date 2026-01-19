@@ -5,10 +5,10 @@ set -euo pipefail
 # Parallelizes jobs in batches on GPUs 0 and 1.
 
 ROOT_DIR="$(pwd)"
-LOGDIR="${ROOT_DIR}/runs_logs"
+LOGDIR="${ROOT_DIR}/runs_logs_$(date +"%Y%m%d-%H%M%S")"
 mkdir -p "${LOGDIR}"
 
-channels=("TDL-D" "TDL-A" "CDL-C")
+channels=("TDL-A")
 speeds=(10 40 60 100)
 
 # GPUs available (logical device ids)

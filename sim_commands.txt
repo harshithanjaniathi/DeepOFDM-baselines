@@ -1,0 +1,43 @@
+##### new 05/02 ##### 100K
+
+# np 1 layer linear
+
+python neural_precoder.py --gpu 0 --precoder_arch linear_1l --kernel_size 5 --precoder_mode nm --pilot_loc " " --modulation neural --num_bits_per_symbol 6 --num_delay 1 --random_seed 101 --num_training_iterations 100000 --num_conv_channels_precoder 36 --num_conv_channels_receiver 64 --num_subcarriers 128 --subcarrier_spacing 15e3 --delay_spread 150e-9 --direction uplink --num_ut_ant 1 --num_bs_ant 1 --training_ebno_min 0 --training_ebno_max 20 --training_ebno_step 4 --num_vals 25 --inference_ebno_min 0 --inference_ebno_max 15 --inference_ebno_step 2  --max_mc_iter 5000 --target_bler 1e-3 --inference_batch_size 128 --min_speed 0.0 --max_speed 40.0 --inf_speed 40.0 --training
+
+# np 1 layer relu
+
+python neural_precoder.py --gpu 1 --precoder_arch linear_1l_relu --kernel_size 5 --precoder_mode nm --pilot_loc " " --modulation neural --num_bits_per_symbol 6 --num_delay 1 --random_seed 101 --num_training_iterations 100000 --num_conv_channels_precoder 36 --num_conv_channels_receiver 64 --num_subcarriers 128 --subcarrier_spacing 15e3 --delay_spread 150e-9 --direction uplink --num_ut_ant 1 --num_bs_ant 1 --training_ebno_min 0 --training_ebno_max 20 --training_ebno_step 4 --num_vals 25 --inference_ebno_min 0 --inference_ebno_max 15 --inference_ebno_step 2  --max_mc_iter 5000 --target_bler 1e-3 --inference_batch_size 128 --min_speed 0.0 --max_speed 40.0 --inf_speed 40.0 --training
+
+
+# np full
+
+python neural_precoder.py --gpu 1 --precoder_arch full --kernel_size 5 --precoder_mode nm --pilot_loc " " --modulation neural --num_bits_per_symbol 6 --num_delay 1 --random_seed 101 --num_training_iterations 100000 --num_conv_channels_precoder 36 --num_conv_channels_receiver 64 --num_subcarriers 128 --subcarrier_spacing 15e3 --delay_spread 150e-9 --direction uplink --num_ut_ant 1 --num_bs_ant 1 --training_ebno_min 0 --training_ebno_max 20 --training_ebno_step 4 --num_vals 25 --inference_ebno_min 0 --inference_ebno_max 15 --inference_ebno_step 2  --max_mc_iter 5000 --target_bler 1e-3 --inference_batch_size 128 --min_speed 0.0 --max_speed 40.0 --inf_speed 40.0 --training
+
+
+# np full - small 
+
+python neural_precoder.py --gpu 3 --precoder_arch full --kernel_size 5 --precoder_mode nm --pilot_loc " " --modulation neural --num_bits_per_symbol 6 --num_delay 1 --random_seed 101 --num_training_iterations 100000 --num_conv_channels_precoder 36 --num_conv_channels_receiver 48 --num_subcarriers 128 --subcarrier_spacing 15e3 --delay_spread 150e-9 --direction uplink --num_ut_ant 1 --num_bs_ant 1 --training_ebno_min 0 --training_ebno_max 20 --training_ebno_step 4 --num_vals 25 --inference_ebno_min 0 --inference_ebno_max 15 --inference_ebno_step 2  --max_mc_iter 5000 --target_bler 1e-3 --inference_batch_size 128 --min_speed 0.0 --max_speed 40.0 --inf_speed 40.0 --training
+
+
+# np sip full - small 
+
+python neural_precoder.py --gpu 3 --precoder_arch full --kernel_size 5 --precoder_mode nm_sip --pilot_loc " " --modulation neural --num_bits_per_symbol 6 --num_delay 1 --random_seed 101 --num_training_iterations 100000 --num_conv_channels_precoder 36 --num_conv_channels_receiver 48 --num_subcarriers 128 --subcarrier_spacing 15e3 --delay_spread 150e-9 --direction uplink --num_ut_ant 1 --num_bs_ant 1 --training_ebno_min 0 --training_ebno_max 20 --training_ebno_step 4 --num_vals 25 --inference_ebno_min 0 --inference_ebno_max 15 --inference_ebno_step 2  --max_mc_iter 5000 --target_bler 1e-3 --inference_batch_size 128 --min_speed 0.0 --max_speed 40.0 --inf_speed 40.0 --training
+
+
+# nrx 
+
+python neural_precoder.py --gpu 3 --precoder_mode nrx --pilot_loc " " --modulation neural --num_bits_per_symbol 6 --num_delay 1 --random_seed 101 --num_training_iterations 100000 --num_conv_channels_precoder 36 --num_conv_channels_receiver 64 --num_subcarriers 128 --subcarrier_spacing 15e3 --delay_spread 150e-9 --direction uplink --num_ut_ant 1 --num_bs_ant 1 --training_ebno_min 0 --training_ebno_max 20 --training_ebno_step 4 --num_vals 25 --inference_ebno_min 0 --inference_ebno_max 15 --inference_ebno_step 2  --max_mc_iter 5000 --target_bler 1e-3 --inference_batch_size 128 --min_speed 0.0 --max_speed 40.0 --inf_speed 40.0 --training
+
+
+# sip+nrx 
+
+python neural_precoder.py --gpu 3 --precoder_mode sip --pilot_loc " " --modulation neural --num_bits_per_symbol 6 --num_delay 1 --random_seed 101 --num_training_iterations 100000 --num_conv_channels_precoder 36 --num_conv_channels_receiver 64 --num_subcarriers 128 --subcarrier_spacing 15e3 --delay_spread 150e-9 --direction uplink --num_ut_ant 1 --num_bs_ant 1 --training_ebno_min 0 --training_ebno_max 20 --training_ebno_step 4 --num_vals 25 --inference_ebno_min 0 --inference_ebno_max 15 --inference_ebno_step 2  --max_mc_iter 5000 --target_bler 1e-3 --inference_batch_size 128 --min_speed 0.0 --max_speed 40.0 --inf_speed 40.0 --training
+
+
+## 1D time
+
+python neural_precoder.py --gpu 2 --precoder_arch time_1D --precoder_mode nm --pilot_loc " " --modulation neural --num_bits_per_symbol 6 --num_delay 1 --random_seed 101 --num_training_iterations 100000 --num_conv_channels_precoder 36 --num_conv_channels_receiver 64 --num_subcarriers 128 --subcarrier_spacing 15e3 --delay_spread 150e-9 --direction uplink --num_ut_ant 1 --num_bs_ant 1 --training_ebno_min 0 --training_ebno_max 20 --training_ebno_step 4 --num_vals 25 --inference_ebno_min 0 --inference_ebno_max 15 --inference_ebno_step 2  --max_mc_iter 5000 --target_bler 1e-3 --inference_batch_size 128 --min_speed 0.0 --max_speed 40.0 --inf_speed 40.0 --training
+
+## 1D freq 
+
+python neural_precoder.py --gpu 2 --precoder_arch freq_1D --precoder_mode nm --pilot_loc " " --modulation neural --num_bits_per_symbol 6 --num_delay 1 --random_seed 101 --num_training_iterations 100000 --num_conv_channels_precoder 36 --num_conv_channels_receiver 64 --num_subcarriers 128 --subcarrier_spacing 15e3 --delay_spread 150e-9 --direction uplink --num_ut_ant 1 --num_bs_ant 1 --training_ebno_min 0 --training_ebno_max 20 --training_ebno_step 4 --num_vals 25 --inference_ebno_min 0 --inference_ebno_max 15 --inference_ebno_step 2  --max_mc_iter 5000 --target_bler 1e-3 --inference_batch_size 128 --min_speed 0.0 --max_speed 40.0 --inf_speed 40.0 --training
